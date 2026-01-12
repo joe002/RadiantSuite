@@ -605,13 +605,20 @@ class SynapseHandler:
         if not node:
             raise ValueError(f"Node not found: {node_path}")
 
+        def _has_expression(p):
+            """Check if parm has expression (Houdini version safe)."""
+            try:
+                return bool(p.expression())
+            except hou.OperationFailed:
+                return False
+
         parm = node.parm(parm_name)
         if parm:
-            return {"value": parm.eval(), "type": str(parm.parmTemplate().type()), "is_expression": parm.isExpression()}
+            return {"value": parm.eval(), "type": str(parm.parmTemplate().type()), "is_expression": _has_expression(parm)}
 
         pt = node.parmTuple(parm_name)
         if pt:
-            return {"value": list(pt.eval()), "type": str(pt.parmTemplate().type()), "is_expression": any(p.isExpression() for p in pt)}
+            return {"value": list(pt.eval()), "type": str(pt.parmTemplate().type()), "is_expression": any(_has_expression(p) for p in pt)}
 
         raise ValueError(f"Parameter not found: {parm_name} on {node_path}")
     
