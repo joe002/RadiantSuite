@@ -1,0 +1,8 @@
+# RadiantSuite Dependencies
+# Install with: pip install -r requirements.txt
+
+# Required for Synapse WebSocket server
+websockets>=12.0
+
+# PySide6 is included with Houdini 21+ (not needed to install separately)
+# PySide6>=6.4

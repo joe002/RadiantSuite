@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="synapse" label="Synapse - AI Bridge"
+             icon="$RADIANT_SUITE/config/icons/synapse.svg"
+             showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[
+import sys
+import os
+import importlib
+from PySide6 import QtWidgets, QtCore
+import hou
+
+# One-time initialization
+if not hasattr(hou.session, "_radiant_synapse_initialized"):
+    hou.session._radiant_synapse_initialized = False
+
+if not hou.session._radiant_synapse_initialized:
+    radiant_dir = os.environ.get("RADIANT_SUITE")
+    if not radiant_dir:
+        QtWidgets.QMessageBox.critical(
+            None,
+            "Environment Error",
+            "RADIANT_SUITE environment variable not set.\n"
+            "Please check your RadiantSuite package installation."
+        )
+    else:
+        python_dir = os.path.join(radiant_dir, "python")
+        if os.path.isdir(python_dir) and python_dir not in sys.path:
+            sys.path.insert(0, python_dir)
+
+        synapse_dir = os.path.join(python_dir, "synapse")
+        if os.path.isdir(synapse_dir) and synapse_dir not in sys.path:
+            sys.path.insert(0, synapse_dir)
+
+    hou.session._radiant_synapse_initialized = True
+
+# Force reload for development
+if "synapse_tool" in sys.modules:
+    del sys.modules["synapse_tool"]
+if "synapse" in sys.modules:
+    del sys.modules["synapse"]
+
+try:
+    from synapse import synapse_tool
+    synapse_tool = importlib.reload(synapse_tool)
+except Exception as e:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "Import Error",
+        f"Could not import synapse_tool:\n{e}"
+    )
+    raise
+
+def onCreateInterface():
+    ui = synapse_tool.create_panel()
+    ui.setWindowFlags(QtCore.Qt.Widget)
+    return ui
+]]></script>
+    <includeInToolbarMenu menu_position="504" create_separator="false"/>
+    <help><![CDATA[Synapse - WebSocket bridge connecting AI assistants (Claude Code, Gemini CLI) to Houdini.]]></help>
+  </interface>
+</pythonPanelDocument>

@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<shelfDocument>
+  <!-- RadiantSuite Shelf - AI-Native DCC Workflow -->
+  <!-- Synapse (Communication) + Engram (Memory) -->
+
+  <toolshelf name="radiantsuite" label="Radiant">
+    <memberTool name="radiant_synapse"/>
+    <memberTool name="radiant_engram"/>
+  </toolshelf>
+
+  <!-- Synapse - AI ↔ Houdini Bridge -->
+  <tool name="radiant_synapse" label="Synapse" icon="$RADIANT_SUITE/config/icons/synapse.svg">
+    <helpText><![CDATA[Synapse - AI ↔ Houdini Bridge
+
+WebSocket server enabling AI assistants to control Houdini in real-time.
+Connect Claude Code, Cursor, Gemini CLI, or any AI tool.
+
+Features:
+• Real-time bidirectional communication
+• Rate limiting & backpressure protection
+• Circuit breaker for crash prevention
+• Watchdog for freeze detection
+• Auto-loads Engram context on connect
+• Logs significant actions to Engram
+
+Default: ws://localhost:9999]]></helpText>
+    <script scriptType="python"><![CDATA[
+import hou
+
+panel_name = "synapse"
+desktop = hou.ui.curDesktop()
+
+# Try to find existing panel
+for pane_tab in desktop.paneTabs():
+    if hasattr(pane_tab, 'activeInterface') and pane_tab.activeInterface():
+        if pane_tab.activeInterface().name() == panel_name:
+            pane_tab.setIsCurrentTab()
+            break
+else:
+    # Create new floating panel
+    try:
+        panel = desktop.createFloatingPaneTab(
+            hou.paneTabType.PythonPanel,
+            (400, 300),
+            (500, 600)
+        )
+        interfaces = hou.pypanel.interfaces()
+        if panel_name in interfaces:
+            panel.setActiveInterface(interfaces[panel_name])
+        else:
+            hou.ui.displayMessage(
+                f"Python panel '{panel_name}' not found.\n"
+                "Please restart Houdini to load RadiantSuite panels.",
+                severity=hou.severityType.Warning
+            )
+    except Exception as e:
+        hou.ui.displayMessage(f"Failed to create panel: {e}")
+]]></script>
+  </tool>
+
+  <!-- Engram - Project Memory -->
+  <tool name="radiant_engram" label="Engram" icon="$RADIANT_SUITE/config/icons/engram.svg">
+    <helpText><![CDATA[Engram - Project Memory
+
+Persistent memory system for AI-assisted workflows.
+Stores context, decisions, and task history with your project.
+
+Features:
+• Project context in human-readable markdown
+• Decision log with reasoning
+• Task history and progress tracking
+• Semantic search across memories
+• Zettelkasten-style memory linking
+• Auto-captures AI actions from Synapse
+
+Storage: $HIP/.engram/
+├── context.md    (project overview)
+├── decisions.md  (decision log)
+├── tasks.md      (task history)
+└── memory.jsonl  (structured data)]]></helpText>
+    <script scriptType="python"><![CDATA[
+import hou
+
+panel_name = "engram"
+desktop = hou.ui.curDesktop()
+
+# Try to find existing panel
+for pane_tab in desktop.paneTabs():
+    if hasattr(pane_tab, 'activeInterface') and pane_tab.activeInterface():
+        if pane_tab.activeInterface().name() == panel_name:
+            pane_tab.setIsCurrentTab()
+            break
+else:
+    # Create new floating panel
+    try:
+        panel = desktop.createFloatingPaneTab(
+            hou.paneTabType.PythonPanel,
+            (400, 300),
+            (500, 600)
+        )
+        interfaces = hou.pypanel.interfaces()
+        if panel_name in interfaces:
+            panel.setActiveInterface(interfaces[panel_name])
+        else:
+            # Engram panel might not exist yet - show info
+            hou.ui.displayMessage(
+                "Engram panel is being developed.\n\n"
+                "For now, memories are stored in $HIP/.engram/\n"
+                "and accessible via Synapse commands:\n"
+                "• engram_context - Get project context\n"
+                "• engram_search - Search memories\n"
+                "• engram_decide - Record decision",
+                severity=hou.severityType.Message,
+                title="Engram"
+            )
+    except Exception as e:
+        hou.ui.displayMessage(f"Failed to create panel: {e}")
+]]></script>
+  </tool>
+
+</shelfDocument>

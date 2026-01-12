@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="engram" label="Engram - Project Memory"
+             icon="$RADIANT_SUITE/config/icons/engram.svg"
+             showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[
+import sys
+import os
+import importlib
+try:
+    from PySide6 import QtWidgets, QtCore
+except ImportError:
+    from PySide2 import QtWidgets, QtCore
+import hou
+
+# One-time initialization
+if not hasattr(hou.session, "_radiant_engram_initialized"):
+    hou.session._radiant_engram_initialized = False
+
+if not hou.session._radiant_engram_initialized:
+    radiant_dir = os.environ.get("RADIANT_SUITE")
+    if not radiant_dir:
+        QtWidgets.QMessageBox.critical(
+            None,
+            "Environment Error",
+            "RADIANT_SUITE environment variable not set.\n"
+            "Please check your RadiantSuite package installation."
+        )
+    else:
+        python_dir = os.path.join(radiant_dir, "python")
+        if os.path.isdir(python_dir) and python_dir not in sys.path:
+            sys.path.insert(0, python_dir)
+
+        engram_dir = os.path.join(python_dir, "engram")
+        if os.path.isdir(engram_dir) and engram_dir not in sys.path:
+            sys.path.insert(0, engram_dir)
+
+    hou.session._radiant_engram_initialized = True
+
+# Force reload for development
+modules_to_clear = [k for k in sys.modules.keys() if k.startswith("engram")]
+for mod in modules_to_clear:
+    del sys.modules[mod]
+
+try:
+    from engram import engram_tool
+    engram_tool = importlib.reload(engram_tool)
+except Exception as e:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "Import Error",
+        f"Could not import engram_tool:\n{e}"
+    )
+    raise
+
+def onCreateInterface():
+    ui = engram_tool.create_panel()
+    ui.setWindowFlags(QtCore.Qt.Widget)
+    return ui
+]]></script>
+    <includeInToolbarMenu menu_position="505" create_separator="false"/>
+    <help><![CDATA[Engram - Persistent project memory system. Store context, decisions, and task history alongside your .hip file.]]></help>
+  </interface>
+</pythonPanelDocument>

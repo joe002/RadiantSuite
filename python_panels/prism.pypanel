@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="prism" label="Prism - GOBO Manager"
+             icon="$RADIANT_SUITE/config/icons/prism.svg"
+             showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[
+import sys
+import os
+import importlib
+from PySide6 import QtWidgets, QtCore
+import hou
+
+# One-time initialization
+if not hasattr(hou.session, "_radiant_prism_initialized"):
+    hou.session._radiant_prism_initialized = False
+
+if not hou.session._radiant_prism_initialized:
+    radiant_dir = os.environ.get("RADIANT_SUITE")
+    if not radiant_dir:
+        QtWidgets.QMessageBox.critical(
+            None,
+            "Environment Error",
+            "RADIANT_SUITE environment variable not set.\n"
+            "Please check your RadiantSuite package installation."
+        )
+    else:
+        python_dir = os.path.join(radiant_dir, "python")
+        if os.path.isdir(python_dir) and python_dir not in sys.path:
+            sys.path.insert(0, python_dir)
+
+        prism_dir = os.path.join(python_dir, "prism")
+        if os.path.isdir(prism_dir) and prism_dir not in sys.path:
+            sys.path.insert(0, prism_dir)
+
+    hou.session._radiant_prism_initialized = True
+
+# Force reload for development
+if "prism_tool" in sys.modules:
+    del sys.modules["prism_tool"]
+if "prism" in sys.modules:
+    del sys.modules["prism"]
+
+try:
+    from prism import prism_tool
+    prism_tool = importlib.reload(prism_tool)
+except Exception as e:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "Import Error",
+        f"Could not import prism_tool:\n{e}"
+    )
+    raise
+
+def onCreateInterface():
+    ui = prism_tool.create_panel()
+    ui.setWindowFlags(QtCore.Qt.Widget)
+    return ui
+]]></script>
+    <includeInToolbarMenu menu_position="501" create_separator="false"/>
+    <help><![CDATA[Prism - Cross-renderer GOBO management for Karma, Arnold, RenderMan, Redshift, V-Ray.]]></help>
+  </interface>
+</pythonPanelDocument>

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="aurora" label="Aurora - Light Groups &amp; AOV Manager"
+             icon="$RADIANT_SUITE/config/icons/aurora.svg"
+             showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[
+import sys
+import os
+import importlib
+from PySide6 import QtWidgets, QtCore
+import hou
+
+# One-time initialization
+if not hasattr(hou.session, "_radiant_aurora_initialized"):
+    hou.session._radiant_aurora_initialized = False
+
+if not hou.session._radiant_aurora_initialized:
+    radiant_dir = os.environ.get("RADIANT_SUITE")
+    if not radiant_dir:
+        QtWidgets.QMessageBox.critical(
+            None,
+            "Environment Error",
+            "RADIANT_SUITE environment variable not set.\n"
+            "Please check your RadiantSuite package installation."
+        )
+    else:
+        python_dir = os.path.join(radiant_dir, "python")
+        if os.path.isdir(python_dir) and python_dir not in sys.path:
+            sys.path.insert(0, python_dir)
+
+        aurora_dir = os.path.join(python_dir, "aurora")
+        if os.path.isdir(aurora_dir) and aurora_dir not in sys.path:
+            sys.path.insert(0, aurora_dir)
+
+    hou.session._radiant_aurora_initialized = True
+
+# Force reload for development
+if "aurora_tool" in sys.modules:
+    del sys.modules["aurora_tool"]
+if "aurora" in sys.modules:
+    del sys.modules["aurora"]
+
+try:
+    from aurora import aurora_tool
+    aurora_tool = importlib.reload(aurora_tool)
+except Exception as e:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "Import Error",
+        f"Could not import aurora_tool:\n{e}"
+    )
+    raise
+
+def onCreateInterface():
+    ui = aurora_tool.create_panel()
+    ui.setWindowFlags(QtCore.Qt.Widget)
+    return ui
+]]></script>
+    <includeInToolbarMenu menu_position="505" create_separator="false"/>
+    <help><![CDATA[Aurora - Light Groups & AOV Manager for USD/Solaris lighting workflows. Agent-first design with human gate approval system.]]></help>
+  </interface>
+</pythonPanelDocument>

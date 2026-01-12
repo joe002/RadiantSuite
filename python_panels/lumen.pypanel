@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="lumen" label="Lumen - Lighting Rig Manager"
+             icon="$RADIANT_SUITE/config/icons/lumen.svg"
+             showNetworkNavigationBar="false" help_url="">
+    <script><![CDATA[
+import sys
+import os
+import importlib
+from PySide6 import QtWidgets, QtCore
+import hou
+
+# One-time initialization
+if not hasattr(hou.session, "_radiant_lumen_initialized"):
+    hou.session._radiant_lumen_initialized = False
+
+if not hou.session._radiant_lumen_initialized:
+    radiant_dir = os.environ.get("RADIANT_SUITE")
+    if not radiant_dir:
+        QtWidgets.QMessageBox.critical(
+            None,
+            "Environment Error",
+            "RADIANT_SUITE environment variable not set.\n"
+            "Please check your RadiantSuite package installation."
+        )
+    else:
+        python_dir = os.path.join(radiant_dir, "python")
+        if os.path.isdir(python_dir) and python_dir not in sys.path:
+            sys.path.insert(0, python_dir)
+
+        lumen_dir = os.path.join(python_dir, "lumen")
+        if os.path.isdir(lumen_dir) and lumen_dir not in sys.path:
+            sys.path.insert(0, lumen_dir)
+
+    hou.session._radiant_lumen_initialized = True
+
+# Force reload for development
+if "lumen_tool" in sys.modules:
+    del sys.modules["lumen_tool"]
+if "lumen" in sys.modules:
+    del sys.modules["lumen"]
+
+try:
+    from lumen import lumen_tool
+    lumen_tool = importlib.reload(lumen_tool)
+except Exception as e:
+    QtWidgets.QMessageBox.critical(
+        None,
+        "Import Error",
+        f"Could not import lumen_tool:\n{e}"
+    )
+    raise
+
+def onCreateInterface():
+    ui = lumen_tool.create_panel()
+    ui.setWindowFlags(QtCore.Qt.Widget)
+    return ui
+]]></script>
+    <includeInToolbarMenu menu_position="500" create_separator="false"/>
+    <help><![CDATA[Lumen - Professional lighting rig management for Solaris/USD workflows.]]></help>
+  </interface>
+</pythonPanelDocument>
