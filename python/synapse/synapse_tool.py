@@ -37,7 +37,7 @@ WEBSITE: https://github.com/yourusername/synapse
 """
 
 __title__ = "Synapse"
-__version__ = "2.1.0"
+__version__ = "2.2.0"  # Circuit breaker fix + flexible parameter names
 __author__ = "Joe Ibrahim"
 __license__ = "MIT"
 __product__ = "Synapse - AI ↔ Houdini Bridge"
@@ -462,15 +462,28 @@ class SynapseHandler:
         return {"modified": modified}
     
     def _handle_connect_nodes(self, payload: Dict) -> Dict:
-        source = hou.node(payload["source"])
-        target = hou.node(payload["target"])
+        # Accept both naming conventions: source/target OR from_node/to_node
+        source_path = payload.get("source") or payload.get("from_node")
+        target_path = payload.get("target") or payload.get("to_node")
+
+        if not source_path:
+            raise ValueError("Missing 'source' or 'from_node' in payload")
+        if not target_path:
+            raise ValueError("Missing 'target' or 'to_node' in payload")
+
+        source = hou.node(source_path)
+        target = hou.node(target_path)
         if not source:
-            raise ValueError(f"Source not found: {payload['source']}")
+            raise ValueError(f"Source not found: {source_path}")
         if not target:
-            raise ValueError(f"Target not found: {payload['target']}")
-        
-        target.setInput(payload.get("target_input", 0), source, payload.get("source_output", 0))
-        return {"connected": True, "source": payload["source"], "target": payload["target"]}
+            raise ValueError(f"Target not found: {target_path}")
+
+        # Accept both naming conventions for input/output indices
+        target_input = payload.get("target_input") or payload.get("to_input", 0)
+        source_output = payload.get("source_output") or payload.get("from_output", 0)
+
+        target.setInput(target_input, source, source_output)
+        return {"connected": True, "source": source_path, "target": target_path}
     
     def _handle_get_scene_info(self, payload: Dict) -> Dict:
         root_path = payload.get("root", "/")
@@ -525,37 +538,52 @@ class SynapseHandler:
         raise ValueError(f"Parameter not found: {payload['parm']}")
     
     def _handle_set_parm(self, payload: Dict) -> Dict:
-        node = hou.node(payload["path"])
+        # Accept both 'path' and 'node' parameter names
+        node_path = payload.get("path") or payload.get("node")
+        if not node_path:
+            raise ValueError("Missing 'path' or 'node' in payload")
+
+        node = hou.node(node_path)
         if not node:
-            raise ValueError(f"Node not found: {payload['path']}")
-        
-        parm = node.parm(payload["parm"])
+            raise ValueError(f"Node not found: {node_path}")
+
+        parm_name = payload.get("parm") or payload.get("parameter")
+        if not parm_name:
+            raise ValueError("Missing 'parm' or 'parameter' in payload")
+
         value = payload["value"]
-        
+
+        parm = node.parm(parm_name)
         if parm:
             if payload.get("expression", False):
                 parm.setExpression(value)
             else:
                 parm.set(value)
-            return {"set": payload["parm"], "value": value}
-        
-        pt = node.parmTuple(payload["parm"])
+            return {"set": parm_name, "value": value, "node": node_path}
+
+        pt = node.parmTuple(parm_name)
         if pt and isinstance(value, (list, tuple)):
             pt.set(value)
-            return {"set": payload["parm"], "value": value}
-        
-        raise ValueError(f"Parameter not found: {payload['parm']}")
+            return {"set": parm_name, "value": value, "node": node_path}
+
+        raise ValueError(f"Parameter not found: {parm_name} on {node_path}")
     
     def _handle_execute_python(self, payload: Dict) -> Dict:
         code = payload["code"]
         context = payload.get("context", {})
-        namespace = {"hou": hou, "__builtins__": __builtins__, "__result__": None, **context}
+        namespace = {"hou": hou, "__builtins__": __builtins__, "__result__": None, "result": None, **context}
         exec(code, namespace)
-        result = namespace.get("__result__")
-        if hasattr(result, "path"):
-            result = {"path": result.path()}
-        elif hasattr(result, "__iter__") and not isinstance(result, (str, dict)):
-            result = list(result)
+
+        # Check both 'result' and '__result__' variable names for flexibility
+        result = namespace.get("result") or namespace.get("__result__")
+
+        # Convert Houdini objects to serializable format
+        if result is not None:
+            if hasattr(result, "path"):
+                result = {"path": result.path(), "name": result.name() if hasattr(result, "name") else None}
+            elif hasattr(result, "__iter__") and not isinstance(result, (str, dict)):
+                result = list(result)
+
         return {"result": result}
     
     def _handle_create_usd_prim(self, payload: Dict) -> Dict:
@@ -804,16 +832,17 @@ class SynapseServer:
         # Resilience components
         if RESILIENCE_AVAILABLE:
             self.rate_limiter = RateLimiter(
-                tokens_per_second=50.0,
-                bucket_size=100,
-                per_client_bucket=20
+                tokens_per_second=100.0,  # Increased for rapid AI commands
+                bucket_size=200,          # Larger burst allowance
+                per_client_bucket=50      # Per-client burst allowance
             )
             self.circuit_breaker = CircuitBreaker(
                 name="synapse",
                 config=CircuitBreakerConfig(
-                    failure_threshold=5,
-                    timeout_seconds=30.0,
-                    success_threshold=3
+                    failure_threshold=20,      # Much higher - only trip on persistent issues
+                    timeout_seconds=10.0,      # Faster recovery
+                    success_threshold=2,       # Quick recovery from half-open
+                    half_open_max_calls=10     # More test calls in half-open
                 )
             )
             self.port_manager = PortManager(
@@ -1083,8 +1112,25 @@ class SynapseServer:
                 break
     
     def process_commands(self) -> int:
-        """Process pending commands with resilience checks."""
+        """Process pending commands with resilience checks.
+
+        Error Classification:
+        - USER_ERROR: ValueError, KeyError, AttributeError, hou.OperationFailed
+          These are user/validation errors - DO NOT trip circuit breaker
+        - SERVICE_ERROR: TimeoutError, threading errors, Houdini crashes
+          These are service failures - DO trip circuit breaker
+        """
         processed = 0
+
+        # Error types that should NOT trip the circuit breaker
+        USER_ERROR_TYPES = (
+            ValueError,
+            KeyError,
+            AttributeError,
+            TypeError,
+            IndexError,
+            NameError,
+        )
 
         # Send watchdog heartbeat (proves main thread is responsive)
         if self._resilience_enabled:
@@ -1092,7 +1138,7 @@ class SynapseServer:
 
             # Update backpressure based on queue size
             queue_size = self.command_queue.size()
-            avg_latency = 0.0  # Could track this more precisely
+            avg_latency = 0.0
             if hasattr(self.watchdog, 'get_stats'):
                 stats = self.watchdog.get_stats()
                 avg_latency = stats.get('avg_latency', 0.0)
@@ -1115,32 +1161,54 @@ class SynapseServer:
             try:
                 response = self.handler.handle(command)
 
-                # Track success/failure for circuit breaker
+                # Track success/failure - but DON'T trip circuit on user errors
                 if self._resilience_enabled:
                     if response.success:
+                        # Successful command - record success (helps close circuit)
                         self.circuit_breaker.record_success()
                         self._commands_succeeded += 1
                     else:
-                        self.circuit_breaker.record_failure()
+                        # Command returned error - this is a USER error, not SERVICE error
+                        # DO NOT record as circuit breaker failure
                         self._commands_failed += 1
+                        # But DO record success for circuit breaker since service is working
+                        self.circuit_breaker.record_success()
 
                 self.response_queue.enqueue(response, client)
                 processed += 1
 
-            except Exception as e:
-                # Command execution failed - record for circuit breaker
+            except USER_ERROR_TYPES as e:
+                # User/validation error - service is working, user made a mistake
+                # DO NOT trip circuit breaker
+                self._commands_failed += 1
                 if self._resilience_enabled:
-                    self.circuit_breaker.record_failure(e)
-                    self._commands_failed += 1
+                    # Record as success since service processed the request
+                    self.circuit_breaker.record_success()
 
                 error_response = SynapseResponse(
                     id=command.id,
                     success=False,
-                    error=f"Execution error: {e}",
+                    error=f"{type(e).__name__}: {str(e)}",
                     sequence=command.sequence
                 )
                 self.response_queue.enqueue(error_response, client)
                 processed += 1
+
+            except Exception as e:
+                # Service error (timeout, threading, crash) - DO trip circuit
+                if self._resilience_enabled:
+                    self.circuit_breaker.record_failure(e)
+                self._commands_failed += 1
+
+                error_response = SynapseResponse(
+                    id=command.id,
+                    success=False,
+                    error=f"Service error: {type(e).__name__}: {str(e)}",
+                    sequence=command.sequence
+                )
+                self.response_queue.enqueue(error_response, client)
+                processed += 1
+                print(f"[Synapse] SERVICE ERROR (circuit breaker notified): {e}")
 
         return processed
 
