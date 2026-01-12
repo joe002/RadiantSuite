@@ -14,7 +14,7 @@
 └───────────────────────────────────────────────────────────────────────┘▒
  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
 
-Synapse v2.1.0 | Houdini 21+ | Python 3.9+
+Synapse v2.3.0 | Houdini 21+ | Python 3.9+
 
 WebSocket-based bridge enabling AI assistants to create nodes, manipulate scenes,
 and control Houdini in real-time. Designed for production stability.
@@ -27,6 +27,14 @@ FEATURES:
 • Protocol versioning for forward compatibility
 • Graceful shutdown and reconnection handling
 
+RESILIENCE (v2.3.0):
+• Automatic port failover - tries backup ports if primary is in use
+• Centralized parameter aliasing - accepts multiple naming conventions
+• Error classification - user errors don't trip circuit breaker
+• Enhanced error messages with actionable hints
+• Circuit breaker with high threshold (20 failures)
+• Rate limiting with generous burst allowance
+
 USAGE:
     from synapse import create_panel
     panel = create_panel()
@@ -37,7 +45,7 @@ WEBSITE: https://github.com/yourusername/synapse
 """
 
 __title__ = "Synapse"
-__version__ = "2.2.0"  # Circuit breaker fix + flexible parameter names
+__version__ = "2.3.0"  # Resilience overhaul: auto port failover, better errors, validation
 __author__ = "Joe Ibrahim"
 __license__ = "MIT"
 __product__ = "Synapse - AI ↔ Houdini Bridge"
@@ -56,11 +64,13 @@ from collections import OrderedDict
 from abc import ABC, abstractmethod
 from PySide6 import QtWidgets, QtCore, QtGui
 
-# Protocol version for compatibility checking
-PROTOCOL_VERSION = "2.1.0"
+# Protocol version for compatibility checking - MUST match __version__
+PROTOCOL_VERSION = "2.3.0"  # Synced with __version__ - resilience overhaul
 HEARTBEAT_INTERVAL = 30.0
 COMMAND_TIMEOUT = 60.0
 MAX_PENDING_COMMANDS = 100
+MAX_PORT_RETRIES = 4  # How many backup ports to try
+PORT_RETRY_DELAY = 0.5  # Seconds between port attempts
 
 # Optional websockets import
 try:
@@ -192,9 +202,77 @@ class SynapseResponse:
     sequence: int = 0
     timestamp: float = field(default_factory=time.time)
     protocol_version: str = PROTOCOL_VERSION
-    
+
     def to_json(self) -> str:
         return json.dumps(asdict(self))
+
+
+# =============================================================================
+# PARAMETER ALIASING - Accept multiple naming conventions
+# =============================================================================
+# Maps canonical parameter names to acceptable aliases.
+# Allows clients to use different naming conventions (camelCase, snake_case, etc.)
+
+PARAM_ALIASES: Dict[str, List[str]] = {
+    # Node references
+    "source": ["source", "from_node", "from", "src", "input_node"],
+    "target": ["target", "to_node", "to", "dst", "output_node", "dest"],
+    "node": ["node", "path", "node_path"],
+    "parent": ["parent", "parent_path", "parent_node"],
+
+    # Input/output indices
+    "source_output": ["source_output", "from_output", "output_index", "out_idx"],
+    "target_input": ["target_input", "to_input", "input_index", "in_idx"],
+
+    # Parameters
+    "parm": ["parm", "parameter", "param", "attr", "attribute"],
+    "value": ["value", "val", "v"],
+
+    # Node creation
+    "type": ["type", "node_type", "nodeType"],
+    "name": ["name", "node_name", "nodeName"],
+
+    # USD
+    "prim_path": ["prim_path", "path", "primPath"],
+    "prim_type": ["prim_type", "type", "primType"],
+}
+
+
+def resolve_param(payload: Dict, canonical: str, required: bool = True) -> Any:
+    """
+    Resolve a parameter from payload using aliasing.
+
+    Args:
+        payload: The command payload dictionary
+        canonical: The canonical parameter name
+        required: Whether the parameter is required
+
+    Returns:
+        The parameter value, or None if not found and not required
+
+    Raises:
+        ValueError: If required parameter is not found
+    """
+    aliases = PARAM_ALIASES.get(canonical, [canonical])
+
+    for alias in aliases:
+        if alias in payload:
+            return payload[alias]
+
+    if required:
+        alias_list = ", ".join(f"'{a}'" for a in aliases)
+        raise ValueError(
+            f"Missing required parameter. Expected one of: {alias_list}\n"
+            f"HINT: Common names are '{canonical}' or '{aliases[1] if len(aliases) > 1 else canonical}'"
+        )
+
+    return None
+
+
+def resolve_param_with_default(payload: Dict, canonical: str, default: Any) -> Any:
+    """Resolve parameter with a default value if not found."""
+    result = resolve_param(payload, canonical, required=False)
+    return result if result is not None else default
 
 
 # =============================================================================
@@ -462,25 +540,21 @@ class SynapseHandler:
         return {"modified": modified}
     
     def _handle_connect_nodes(self, payload: Dict) -> Dict:
-        # Accept both naming conventions: source/target OR from_node/to_node
-        source_path = payload.get("source") or payload.get("from_node")
-        target_path = payload.get("target") or payload.get("to_node")
-
-        if not source_path:
-            raise ValueError("Missing 'source' or 'from_node' in payload")
-        if not target_path:
-            raise ValueError("Missing 'target' or 'to_node' in payload")
+        """Connect two nodes. Uses centralized parameter aliasing."""
+        # Use centralized aliasing for maximum flexibility
+        source_path = resolve_param(payload, "source")
+        target_path = resolve_param(payload, "target")
 
         source = hou.node(source_path)
         target = hou.node(target_path)
         if not source:
-            raise ValueError(f"Source not found: {source_path}")
+            raise ValueError(f"Source node not found: {source_path}\nHINT: Check if the node path is correct")
         if not target:
-            raise ValueError(f"Target not found: {target_path}")
+            raise ValueError(f"Target node not found: {target_path}\nHINT: Check if the node path is correct")
 
-        # Accept both naming conventions for input/output indices
-        target_input = payload.get("target_input") or payload.get("to_input", 0)
-        source_output = payload.get("source_output") or payload.get("from_output", 0)
+        # Use centralized aliasing for indices with defaults
+        target_input = resolve_param_with_default(payload, "target_input", 0)
+        source_output = resolve_param_with_default(payload, "source_output", 0)
 
         target.setInput(target_input, source, source_output)
         return {"connected": True, "source": source_path, "target": target_path}
@@ -523,35 +597,40 @@ class SynapseHandler:
         return {"selected": selected}
     
     def _handle_get_parm(self, payload: Dict) -> Dict:
-        node = hou.node(payload["path"])
-        if not node:
-            raise ValueError(f"Node not found: {payload['path']}")
-        
-        parm = node.parm(payload["parm"])
-        if parm:
-            return {"value": parm.eval(), "type": str(parm.parmTemplate().type()), "is_expression": parm.isExpression()}
-        
-        pt = node.parmTuple(payload["parm"])
-        if pt:
-            return {"value": list(pt.eval()), "type": str(pt.parmTemplate().type()), "is_expression": any(p.isExpression() for p in pt)}
-        
-        raise ValueError(f"Parameter not found: {payload['parm']}")
-    
-    def _handle_set_parm(self, payload: Dict) -> Dict:
-        # Accept both 'path' and 'node' parameter names
-        node_path = payload.get("path") or payload.get("node")
-        if not node_path:
-            raise ValueError("Missing 'path' or 'node' in payload")
+        """Get a parameter value. Uses centralized parameter aliasing."""
+        node_path = resolve_param(payload, "node")
+        parm_name = resolve_param(payload, "parm")
 
         node = hou.node(node_path)
         if not node:
             raise ValueError(f"Node not found: {node_path}")
 
-        parm_name = payload.get("parm") or payload.get("parameter")
-        if not parm_name:
-            raise ValueError("Missing 'parm' or 'parameter' in payload")
+        parm = node.parm(parm_name)
+        if parm:
+            return {"value": parm.eval(), "type": str(parm.parmTemplate().type()), "is_expression": parm.isExpression()}
 
-        value = payload["value"]
+        pt = node.parmTuple(parm_name)
+        if pt:
+            return {"value": list(pt.eval()), "type": str(pt.parmTemplate().type()), "is_expression": any(p.isExpression() for p in pt)}
+
+        raise ValueError(f"Parameter not found: {parm_name} on {node_path}")
+    
+    def _handle_set_parm(self, payload: Dict) -> Dict:
+        """Set a parameter value. Uses centralized parameter aliasing."""
+        # Use centralized aliasing
+        node_path = resolve_param(payload, "node")
+        parm_name = resolve_param(payload, "parm")
+
+        node = hou.node(node_path)
+        if not node:
+            raise ValueError(
+                f"Node not found: {node_path}\n"
+                f"HINT: Use absolute paths like '/obj/geo1' or check node exists"
+            )
+
+        value = payload.get("value")
+        if value is None:
+            raise ValueError("Missing 'value' parameter")
 
         parm = node.parm(parm_name)
         if parm:
@@ -566,7 +645,12 @@ class SynapseHandler:
             pt.set(value)
             return {"set": parm_name, "value": value, "node": node_path}
 
-        raise ValueError(f"Parameter not found: {parm_name} on {node_path}")
+        # Provide helpful error with available parameters
+        available = [p.name() for p in node.parms()[:20]]  # First 20 parms
+        raise ValueError(
+            f"Parameter '{parm_name}' not found on {node_path}\n"
+            f"HINT: Available parameters include: {', '.join(available[:10])}..."
+        )
     
     def _handle_execute_python(self, payload: Dict) -> Dict:
         code = payload["code"]
@@ -724,13 +808,27 @@ class SynapseHandler:
         return {"prims": prims, "count": len(prims), "truncated": count >= prim_limit, "stage_root": str(stage.GetPseudoRoot().GetPath())}
     
     def _handle_ping(self, payload: Dict) -> Dict:
-        return {
+        """Enhanced ping with diagnostic info for troubleshooting."""
+        response = {
             "pong": True,
             "product": __product__,
+            "version": __version__,
             "protocol_version": PROTOCOL_VERSION,
             "houdini_version": hou.applicationVersionString(),
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "features": {
+                "resilience": RESILIENCE_AVAILABLE,
+                "engram": ENGRAM_AVAILABLE,
+                "websockets": WEBSOCKETS_AVAILABLE,
+            },
+            "aliases_supported": list(PARAM_ALIASES.keys()),
         }
+
+        # Add resilience status if available
+        if RESILIENCE_AVAILABLE:
+            response["circuit_state"] = "available"
+
+        return response
     
     def _handle_get_node_types(self, payload: Dict) -> Dict:
         category_name = payload.get("category", "Sop")
@@ -867,10 +965,21 @@ class SynapseServer:
         else:
             self._resilience_enabled = False
 
+        # Port tracking (may differ from self.port if failover occurred)
+        self._actual_port: Optional[int] = None
+
         # Stats tracking
         self._commands_succeeded = 0
         self._commands_failed = 0
         self._commands_rejected = 0
+
+    def get_actual_port(self) -> int:
+        """Get the actual port the server is running on (may differ from requested port)."""
+        return self._actual_port if self._actual_port else self.port
+
+    def get_connection_url(self) -> str:
+        """Get the WebSocket URL clients should connect to."""
+        return f"ws://{self.host}:{self.get_actual_port()}"
 
     def _on_main_thread_freeze(self, duration: float):
         """Called when watchdog detects main thread freeze."""
@@ -937,25 +1046,79 @@ class SynapseServer:
         print("[Synapse] Server stopped")
     
     def _run_server(self):
-        try:
-            # websockets sync API - serve_forever() handles connections
-            with serve(self._handle_client, self.host, self.port) as server:
-                self._server = server
-                print(f"[Synapse] Server started on ws://{self.host}:{self.port}")
-                # serve_forever() blocks and processes connections
-                # It will exit when server.shutdown() is called
-                server.serve_forever()
-        except OSError as e:
-            # Port already in use or permission denied
-            print(f"[Synapse] Server bind error: {e}")
-            print(f"[Synapse] Port {self.port} may already be in use")
-        except Exception as e:
-            if self._running:  # Only log if not intentionally shutting down
-                print(f"[Synapse] Server error: {e}")
-                traceback.print_exc()
-        finally:
-            self._running = False
-            print("[Synapse] Server thread exited")
+        """Run WebSocket server with automatic port failover.
+
+        If primary port fails, automatically tries backup ports.
+        Updates self.port to the actual port used.
+        """
+        ports_to_try = [self.port]
+        if self._resilience_enabled:
+            # Add backup ports from port manager
+            ports_to_try.extend(self.port_manager.backup_ports)
+        else:
+            # Fallback backup ports if resilience not available
+            ports_to_try.extend([self.port - 1, self.port - 2, self.port - 3])
+
+        last_error = None
+
+        for attempt, port in enumerate(ports_to_try):
+            if not self._running:
+                break
+
+            try:
+                # websockets sync API - serve_forever() handles connections
+                with serve(self._handle_client, self.host, port) as server:
+                    self._server = server
+                    self._actual_port = port  # Track actual port used
+
+                    if port != self.port:
+                        print(f"[Synapse] Primary port {self.port} unavailable")
+                        print(f"[Synapse] Using backup port {port}")
+
+                    print(f"[Synapse] Server started on ws://{self.host}:{port}")
+                    print(f"[Synapse] Protocol version: {PROTOCOL_VERSION}")
+
+                    # Mark port as active in port manager
+                    if self._resilience_enabled:
+                        self.port_manager.mark_active(port)
+                        self.port_manager.mark_healthy(port)
+
+                    # serve_forever() blocks until shutdown
+                    server.serve_forever()
+                    return  # Normal exit
+
+            except OSError as e:
+                last_error = e
+                error_msg = str(e)
+
+                # Log the failure
+                print(f"[Synapse] Port {port} bind failed: {error_msg}")
+
+                # Mark port as unhealthy
+                if self._resilience_enabled:
+                    self.port_manager.mark_unhealthy(port, error_msg)
+
+                # Wait before trying next port
+                if attempt < len(ports_to_try) - 1:
+                    time.sleep(PORT_RETRY_DELAY)
+                continue
+
+            except Exception as e:
+                if self._running:  # Only log if not intentionally shutting down
+                    print(f"[Synapse] Server error on port {port}: {e}")
+                    traceback.print_exc()
+                break
+
+        # All ports failed
+        if last_error and self._running:
+            print(f"[Synapse] CRITICAL: All ports failed!")
+            print(f"[Synapse] Tried ports: {ports_to_try}")
+            print(f"[Synapse] Last error: {last_error}")
+            print(f"[Synapse] HINT: Another process may be using these ports.")
+            print(f"[Synapse] HINT: Try 'netstat -ano | findstr :9999' to check.")
+
+        self._running = False
+        print("[Synapse] Server thread exited")
     
     def _handle_client(self, websocket):
         client_id = id(websocket)
